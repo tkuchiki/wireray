@@ -1,4 +1,4 @@
-package httpprof
+package wireray
 
 import (
 	"fmt"

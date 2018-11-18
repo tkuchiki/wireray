@@ -1,4 +1,4 @@
-package httpprof
+package wireray
 
 import (
 	"fmt"
@@ -20,8 +20,8 @@ import (
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/pcapgo"
 	"github.com/google/gopacket/reassembly"
-	"github.com/k0kubun/pp"
 	"github.com/tkuchiki/gohttpstats"
+	"github.com/tkuchiki/wireray/options"
 )
 
 type HTTPLog struct {
@@ -40,41 +40,17 @@ type HTTPProfiler struct {
 	stats  *httpstats.HTTPStats
 	handle *pcap.Handle
 	source *gopacket.PacketSource
-	config Config
+	opts   *options.Options
 	mu     sync.RWMutex
 }
 
-type Config struct {
-	iface   string
-	snaplen int
-	port    int
-	lazy    bool
-}
-
-func NewConfig(iface string, snaplen, port int, lazy bool) Config {
-	return Config{
-		iface:   iface,
-		snaplen: snaplen,
-		port:    port,
-		lazy:    lazy,
-	}
-}
-
-func (c *Config) int32Snaplen() int32 {
-	return int32(c.snaplen)
-}
-
-func (c *Config) uint32Snaplen() uint32 {
-	return uint32(c.snaplen)
-}
-
-func NewHTTPProfiler(conf Config, po *httpstats.PrintOption) *HTTPProfiler {
+func NewHTTPProfiler(opts *options.Options, stats *httpstats.HTTPStats) *HTTPProfiler {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	return &HTTPProfiler{
-		sig:    sig,
-		config: conf,
-		stats:  httpstats.NewHTTPStats(true, false, false, po),
+		sig:   sig,
+		opts:  opts,
+		stats: stats,
 	}
 }
 
@@ -85,15 +61,15 @@ func (prof *HTTPProfiler) WritePcap(pfile string) error {
 	}
 
 	w := pcapgo.NewWriter(f)
-	w.WriteFileHeader(prof.config.uint32Snaplen(), layers.LinkTypeEthernet)
+	w.WriteFileHeader(prof.opts.Uint32Snaplen(), layers.LinkTypeEthernet)
 	defer f.Close()
 
-	handle, err := openLive(prof.config.iface, prof.config.int32Snaplen())
+	handle, err := openLive(prof.opts.Iface, prof.opts.Int32Snaplen())
 	if err != nil {
 		return err
 	}
 	defer handle.Close()
-	bpffilter := bpfFilterWithPort(prof.config.port)
+	bpffilter := bpfFilterWithPort(prof.opts.Port)
 	log.Println(fmt.Sprintf("Using BPF filter %q", bpffilter))
 	if err = handle.SetBPFFilter(bpffilter); err != nil {
 		return fmt.Errorf("BPF filter error:", err)
@@ -101,7 +77,7 @@ func (prof *HTTPProfiler) WritePcap(pfile string) error {
 	log.Println("Starting to read packets")
 
 	source := gopacket.NewPacketSource(handle, handle.LinkType())
-	source.Lazy = prof.config.lazy
+	source.Lazy = prof.opts.Lazy
 	source.NoCopy = true
 
 	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
@@ -122,23 +98,31 @@ capture:
 	return nil
 }
 
-func (prof *HTTPProfiler) LiveProfile() error {
-	handle, err := openLive(prof.config.iface, prof.config.int32Snaplen())
+func (prof *HTTPProfiler) Profile() error {
+	var handle *pcap.Handle
+	var err error
+
+	if prof.opts.Pcap != "" {
+		handle, err = openOffline(prof.opts.Pcap)
+	} else {
+		handle, err = openLive(prof.opts.Iface, prof.opts.Int32Snaplen())
+	}
+
 	if err != nil {
 		return err
 	}
 	defer handle.Close()
 
-	bpffilter := bpfFilterWithPort(prof.config.port)
+	bpffilter := bpfFilterWithPort(prof.opts.Port)
 	log.Println(fmt.Sprintf("Using BPF filter %q", bpffilter))
 	if err = handle.SetBPFFilter(bpffilter); err != nil {
 		return fmt.Errorf("BPF filter error:", err)
 	}
 
-	source := newPacketSource(handle, prof.config.lazy)
+	source := newPacketSource(handle, prof.opts.Lazy)
 
 	log.Println("Starting to read packets")
-	streamFactory := newTCPStreamFactory(prof.config.port)
+	streamFactory := newTCPStreamFactory(prof.opts.Port)
 	streamPool := reassembly.NewStreamPool(streamFactory)
 	assembler := reassembly.NewAssembler(streamPool)
 
@@ -152,77 +136,7 @@ func (prof *HTTPProfiler) LiveProfile() error {
 					continue
 				}
 
-				prof.mu.Lock()
-				if v.isRequest {
-					// request
-					requestlog[v.id] = v
-				} else {
-					// response
-					restime := v.time.Sub(requestlog[v.id].time)
-					prof.stats.Set(requestlog[v.id].url, requestlog[v.id].method, v.status,
-						float64(restime.Seconds()), float64(requestlog[v.id].body), float64(v.body))
-				}
-				prof.mu.Unlock()
-			}
-		}
-	}()
-
-	packets := source.Packets()
-
-live_profile:
-	for {
-		select {
-		case packet := <-packets:
-
-			tcp := packet.Layer(layers.LayerTypeTCP)
-			if tcp != nil {
-				tcp := tcp.(*layers.TCP)
-				c := Context{
-					CaptureInfo: packet.Metadata().CaptureInfo,
-				}
-				assembler.AssembleWithContext(packet.NetworkLayer().NetworkFlow(), tcp, &c)
-			}
-		case <-prof.sig:
-			log.Println("Stopping to read packets")
-			break live_profile
-		}
-
-	}
-
-	assembler.FlushAll()
-	streamFactory.WaitGoRoutines()
-	prof.print()
-
-	return nil
-}
-
-func (prof *HTTPProfiler) Profile(pfile string) error {
-	handle, err := openOffline(pfile)
-	if err != nil {
-		return err
-	}
-	defer handle.Close()
-
-	bpffilter := bpfFilterWithPort(prof.config.port)
-	log.Println(fmt.Sprintf("Using BPF filter %q", bpffilter))
-	if err = handle.SetBPFFilter(bpffilter); err != nil {
-		return fmt.Errorf("BPF filter error:", err)
-	}
-
-	source := newPacketSource(handle, prof.config.lazy)
-
-	log.Println("Starting to read packets")
-	streamFactory := newTCPStreamFactory(prof.config.port)
-	streamPool := reassembly.NewStreamPool(streamFactory)
-	assembler := reassembly.NewAssembler(streamPool)
-
-	requestlog := make(map[string]HTTPLog)
-
-	go func() {
-		for {
-			select {
-			case v := <-streamFactory.logch:
-				if v.url == "" {
+				if !prof.stats.DoFilter(v.url, v.method, v.time.String()) {
 					continue
 				}
 
@@ -234,7 +148,7 @@ func (prof *HTTPProfiler) Profile(pfile string) error {
 					// response
 					restime := v.time.Sub(requestlog[v.id].time)
 					prof.stats.Set(requestlog[v.id].url, requestlog[v.id].method, v.status,
-						float64(restime.Seconds()), float64(requestlog[v.id].body), float64(v.body))
+						float64(restime.Seconds()), float64(v.body), 0)
 				}
 				prof.mu.Unlock()
 			}
@@ -247,7 +161,9 @@ profile:
 	for {
 		select {
 		case packet := <-packets:
-			pp.Println(packet)
+			if packet == nil {
+				break profile
+			}
 			tcp := packet.Layer(layers.LayerTypeTCP)
 			if tcp != nil {
 				tcp := tcp.(*layers.TCP)
@@ -306,22 +222,22 @@ func responseLog(t time.Time, method, url string, body, status int, restime floa
 }
 
 func (prof *HTTPProfiler) LiveLogging() error {
-	handle, err := openLive(prof.config.iface, prof.config.int32Snaplen())
+	handle, err := openLive(prof.opts.Iface, prof.opts.Int32Snaplen())
 	if err != nil {
 		return err
 	}
 	defer handle.Close()
 
-	bpffilter := bpfFilterWithPort(prof.config.port)
+	bpffilter := bpfFilterWithPort(prof.opts.Port)
 	log.Println(fmt.Sprintf("Using BPF filter %q", bpffilter))
 	if err = handle.SetBPFFilter(bpffilter); err != nil {
 		return fmt.Errorf("BPF filter error:", err)
 	}
 
-	source := newPacketSource(handle, prof.config.lazy)
+	source := newPacketSource(handle, prof.opts.Lazy)
 
 	log.Println("Starting to read packets")
-	streamFactory := newTCPStreamFactory(prof.config.port)
+	streamFactory := newTCPStreamFactory(prof.opts.Port)
 	streamPool := reassembly.NewStreamPool(streamFactory)
 	assembler := reassembly.NewAssembler(streamPool)
 
@@ -398,5 +314,6 @@ live_logging:
 }
 
 func (prof *HTTPProfiler) print() {
+	prof.stats.SortWithOptions()
 	prof.stats.Print()
 }

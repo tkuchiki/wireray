@@ -12,5 +12,6 @@
 *.out
 .idea
 *.pcap
-cli/httpprof/httpprof
-cli/httpprof/tmp
+cli/wireray/*
+!cli/wireray/main.go
+vendor/
