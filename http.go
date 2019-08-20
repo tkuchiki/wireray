@@ -2,6 +2,7 @@ package wireray
 
 import (
 	"bufio"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -53,19 +54,25 @@ func (h *HTTPReader) run(wg *sync.WaitGroup) {
 				log.Println(fmt.Sprintf("HTTP-request-body", "Got body err: %s\n", err))
 				continue
 			}
-			req.Body.Close()
+			defer req.Body.Close()
 			h.parent.method = req.Method
 			h.parent.url = req.URL.EscapedPath()
 
-			h.parent.logch <- HTTPLog{
+			hl := HTTPLog{
 				id:        h.parent.id,
 				time:      h.time,
-				body:      s,
+				bodyBytes: s,
 				method:    h.parent.method,
 				url:       h.parent.url,
 				header:    req.Header,
 				isRequest: true,
 			}
+
+			if h.parent.dumpBody {
+				hl.body = string(body)
+			}
+
+			h.parent.logch <- hl
 		} else {
 			res, err := http.ReadResponse(b, nil)
 			h.time = time.Now()
@@ -76,24 +83,43 @@ func (h *HTTPReader) run(wg *sync.WaitGroup) {
 				log.Println(fmt.Sprintf("HTTP-response", "HTTP/%s Response error: %s (%v,%+v)\n", h.ident, err, err, err))
 				continue
 			}
-			body, err := ioutil.ReadAll(res.Body)
+			var reader io.ReadCloser
+			switch res.Header.Get("Content-Encoding") {
+			case "gzip":
+				if h.parent.gunzip {
+					reader, err = gzip.NewReader(res.Body)
+					defer reader.Close()
+				} else {
+					reader = res.Body
+				}
+			default:
+				reader = res.Body
+			}
+			body, err := ioutil.ReadAll(reader)
 			s := len(body)
+
 			if err != nil {
 				log.Println(fmt.Sprintf("HTTP-response-body", "HTTP/%s: failed to get body(parsed len:%d): %s\n", h.ident, s, err))
 				continue
 			}
 
-			res.Body.Close()
-			h.parent.logch <- HTTPLog{
+			defer res.Body.Close()
+			hl := HTTPLog{
 				id:        h.parent.id,
 				time:      h.time,
-				body:      s,
+				bodyBytes: s,
 				method:    h.parent.method,
 				url:       h.parent.url,
 				status:    res.StatusCode,
 				header:    res.Header,
 				isRequest: false,
 			}
+
+			if h.parent.dumpBody {
+				hl.body = string(body)
+			}
+
+			h.parent.logch <- hl
 		}
 	}
 }

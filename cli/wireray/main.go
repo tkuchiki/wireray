@@ -8,9 +8,12 @@ import (
 )
 
 func main() {
-	p := wireray.NewProfiler(os.Stdout, os.Stderr)
-	err := p.Run()
+	p, err := wireray.NewProfiler(os.Stdout, os.Stderr)
+	if err != nil {
+		log.Fatal(err)
+	}
 
+	err = p.Run()
 	if err != nil {
 		log.Fatal(err)
 	}

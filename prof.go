@@ -2,32 +2,32 @@ package wireray
 
 import (
 	"fmt"
+
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
-
-	"sync"
-
-	"sort"
-
-	"strings"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/pcapgo"
 	"github.com/google/gopacket/reassembly"
-	"github.com/tkuchiki/gohttpstats"
+	"github.com/tkuchiki/alp/parsers"
+	"github.com/tkuchiki/alp/stats"
 	"github.com/tkuchiki/wireray/options"
 )
 
 type HTTPLog struct {
 	id        string
 	time      time.Time
-	body      int
+	bodyBytes int
+	body      string
 	method    string
 	url       string
 	status    int
@@ -36,21 +36,23 @@ type HTTPLog struct {
 }
 
 type HTTPProfiler struct {
-	sig    chan os.Signal
-	stats  *httpstats.HTTPStats
-	handle *pcap.Handle
-	source *gopacket.PacketSource
-	opts   *options.Options
-	mu     sync.RWMutex
+	sig     chan os.Signal
+	stats   *stats.HTTPStats
+	printer *stats.Printer
+	handle  *pcap.Handle
+	source  *gopacket.PacketSource
+	opts    *options.Options
+	mu      sync.RWMutex
 }
 
-func NewHTTPProfiler(opts *options.Options, stats *httpstats.HTTPStats) *HTTPProfiler {
+func NewHTTPProfiler(opts *options.Options, stats *stats.HTTPStats, printer *stats.Printer) *HTTPProfiler {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 	return &HTTPProfiler{
-		sig:   sig,
-		opts:  opts,
-		stats: stats,
+		sig:     sig,
+		opts:    opts,
+		stats:   stats,
+		printer: printer,
 	}
 }
 
@@ -122,7 +124,7 @@ func (prof *HTTPProfiler) Profile() error {
 	source := newPacketSource(handle, prof.opts.Lazy)
 
 	log.Println("Starting to read packets")
-	streamFactory := newTCPStreamFactory(prof.opts.Port)
+	streamFactory := newTCPStreamFactory(prof.opts.Port, prof.opts.Body, prof.opts.Gunzip)
 	streamPool := reassembly.NewStreamPool(streamFactory)
 	assembler := reassembly.NewAssembler(streamPool)
 
@@ -136,7 +138,14 @@ func (prof *HTTPProfiler) Profile() error {
 					continue
 				}
 
-				if !prof.stats.DoFilter(v.url, v.method, v.time.String()) {
+				s := parsers.NewParsedHTTPStat(v.url, v.method, v.time.String(), 0, float64(v.bodyBytes), v.status)
+				b, err := prof.stats.DoFilter(s)
+				if err != nil {
+					log.Println(err.Error())
+					continue
+				}
+
+				if !b {
 					continue
 				}
 
@@ -147,8 +156,9 @@ func (prof *HTTPProfiler) Profile() error {
 				} else {
 					// response
 					restime := v.time.Sub(requestlog[v.id].time)
+
 					prof.stats.Set(requestlog[v.id].url, requestlog[v.id].method, v.status,
-						float64(restime.Seconds()), float64(v.body), 0)
+						float64(restime.Seconds()), float64(v.bodyBytes), 0)
 				}
 				prof.mu.Unlock()
 			}
@@ -202,22 +212,45 @@ func headersToString(header http.Header) string {
 
 	headers := make([]string, 0, len(keys))
 	for _, k := range keys {
-		headers = append(headers, fmt.Sprintf("%s: %s", k, strings.Join(header[k], ",")))
+		headers = append(headers, fmt.Sprintf("[%s: %s]", k, strings.Join(header[k], ",")))
 	}
 
 	return strings.Join(headers, " ")
 }
 
-func requestLog(t time.Time, method, url string, body int, header http.Header) string {
-	return fmt.Sprintf("-> %s %s %s %d bytes %s",
-		formattedTime(t), method, url, body, headersToString(header),
+func requestLog(hl HTTPLog) string {
+	format := "-> %s %s %s %d bytes %s"
+	if hl.body != "" {
+		return fmt.Sprintf("%s%s",
+			fmt.Sprintln(
+				fmt.Sprintf(format,
+					formattedTime(hl.time), hl.method, hl.url, hl.bodyBytes, headersToString(hl.header),
+				),
+			), hl.body,
+		)
+	}
+
+	return fmt.Sprintf(format,
+		formattedTime(hl.time), hl.method, hl.url, hl.bodyBytes, headersToString(hl.header),
 	)
 }
 
-func responseLog(t time.Time, method, url string, body, status int, restime float64, header http.Header) string {
-	return fmt.Sprintf("<- %s %s %s %d bytes %d %f sec %s",
-		formattedTime(t), method, url, body,
-		status, restime, headersToString(header),
+func responseLog(hl HTTPLog, restime float64) string {
+	format := "<- %s %s %s %d bytes %d %f sec %s"
+	if hl.body != "" {
+		return fmt.Sprintf("%s%s",
+			fmt.Sprintln(
+				fmt.Sprintf(format,
+					formattedTime(hl.time), hl.method, hl.url, hl.bodyBytes,
+					hl.status, restime, headersToString(hl.header),
+				),
+			), hl.body,
+		)
+	}
+
+	return fmt.Sprintf(format,
+		formattedTime(hl.time), hl.method, hl.url, hl.bodyBytes,
+		hl.status, restime, headersToString(hl.header),
 	)
 }
 
@@ -237,7 +270,7 @@ func (prof *HTTPProfiler) LiveLogging() error {
 	source := newPacketSource(handle, prof.opts.Lazy)
 
 	log.Println("Starting to read packets")
-	streamFactory := newTCPStreamFactory(prof.opts.Port)
+	streamFactory := newTCPStreamFactory(prof.opts.Port, prof.opts.Body, prof.opts.Gunzip)
 	streamPool := reassembly.NewStreamPool(streamFactory)
 	assembler := reassembly.NewAssembler(streamPool)
 
@@ -258,27 +291,18 @@ func (prof *HTTPProfiler) LiveLogging() error {
 				} else {
 
 					fmt.Println(
-						requestLog(
-							requestlog[v.id].time,
-							requestlog[v.id].method,
-							requestlog[v.id].url,
-							requestlog[v.id].body,
-							requestlog[v.id].header,
-						),
+						requestLog(requestlog[v.id]),
 					)
 
 					restime := v.time.Sub(requestlog[v.id].time)
 					fmt.Println(
 						responseLog(
-							v.time,
-							v.method,
-							v.url,
-							v.body,
-							v.status,
+							v,
 							float64(restime.Seconds()),
-							v.header,
 						),
 					)
+
+					delete(requestlog, v.id)
 				}
 				prof.mu.Unlock()
 			}
@@ -315,5 +339,5 @@ live_logging:
 
 func (prof *HTTPProfiler) print() {
 	prof.stats.SortWithOptions()
-	prof.stats.Print()
+	prof.printer.Print(prof.stats)
 }

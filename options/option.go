@@ -4,18 +4,20 @@ import (
 	"io"
 	"io/ioutil"
 
-	"github.com/tkuchiki/gohttpstats/options"
+	stats_options "github.com/tkuchiki/alp/options"
 
 	"gopkg.in/yaml.v2"
 )
 
 type Options struct {
-	StatsOptions *stats_options.Options `yaml:stats_options`
+	StatsOptions *stats_options.Options `yaml:"stats_options"`
 	Snaplen      int                    `yaml:snaplen`
 	Iface        string                 `yaml:iface`
 	Port         int                    `yaml:port`
 	Pcap         string                 `yaml:pcap`
 	Lazy         bool                   `yaml:lazy`
+	Body         bool                   `yaml:body`
+	Gunzip       bool                   `yaml:gunzip`
 }
 
 type Option func(*Options)
@@ -56,6 +58,22 @@ func Lazy(b bool) Option {
 	return func(opts *Options) {
 		if b {
 			opts.Lazy = b
+		}
+	}
+}
+
+func Body(b bool) Option {
+	return func(opts *Options) {
+		if b {
+			opts.Body = b
+		}
+	}
+}
+
+func Gunzip(b bool) Option {
+	return func(opts *Options) {
+		if b {
+			opts.Gunzip = b
 		}
 	}
 }

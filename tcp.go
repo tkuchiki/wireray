@@ -5,25 +5,26 @@ import (
 	"sync"
 
 	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers" // pulls in all layers decoders
+	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/reassembly"
-	"github.com/satori/go.uuid"
+	"github.com/google/uuid"
 )
 
-/*
- * The TCP factory: returns a new Stream
- */
 type TCPStreamFactory struct {
-	wg    sync.WaitGroup
-	logch chan HTTPLog
-	port  int
+	wg       sync.WaitGroup
+	logch    chan HTTPLog
+	port     int
+	dumpBody bool
+	gunzip   bool
 }
 
-func newTCPStreamFactory(port int) *TCPStreamFactory {
+func newTCPStreamFactory(port int, body, gunzip bool) *TCPStreamFactory {
 	return &TCPStreamFactory{
-		port:  port,
-		logch: make(chan HTTPLog),
+		port:     port,
+		logch:    make(chan HTTPLog),
+		dumpBody: body,
+		gunzip:   gunzip,
 	}
 }
 
@@ -34,7 +35,9 @@ func (factory *TCPStreamFactory) New(net, transport gopacket.Flow, tcp *layers.T
 		reversed:  tcp.SrcPort == layers.TCPPort(factory.port),
 		ident:     fmt.Sprintf("%s:%s", net, transport),
 		logch:     factory.logch,
-		id:        uuid.Must(uuid.NewV4()).String(),
+		id:        uuid.New().String(),
+		dumpBody:  factory.dumpBody,
+		gunzip:    factory.gunzip,
 	}
 
 	stream.client = HTTPReader{
@@ -59,9 +62,6 @@ func (factory *TCPStreamFactory) WaitGoRoutines() {
 	factory.wg.Wait()
 }
 
-/*
- * The assembler context
- */
 type Context struct {
 	CaptureInfo gopacket.CaptureInfo
 }
@@ -70,23 +70,18 @@ func (c *Context) GetCaptureInfo() gopacket.CaptureInfo {
 	return c.CaptureInfo
 }
 
-/*
- * TCP stream
- */
-
-/* It's a connection (bidirectional) */
 type TCPStream struct {
 	net, transport gopacket.Flow
-	isHTTP         bool
 	reversed       bool
 	client         HTTPReader
 	server         HTTPReader
 	ident          string
-	//
-	logch  chan HTTPLog
-	id     string
-	url    string
-	method string
+	logch          chan HTTPLog
+	id             string
+	url            string
+	method         string
+	dumpBody       bool
+	gunzip         bool
 }
 
 func (t *TCPStream) Accept(tcp *layers.TCP, ci gopacket.CaptureInfo, dir reassembly.TCPFlowDirection, nextSeq reassembly.Sequence, start *bool, ac reassembly.AssemblerContext) bool {
@@ -98,7 +93,6 @@ func (t *TCPStream) ReassembledSG(sg reassembly.ScatterGather, ac reassembly.Ass
 	length, _ := sg.Lengths()
 
 	if skip != 0 {
-		// Missing bytes in stream: do not even try to parse it
 		return
 	}
 	data := sg.Fetch(length)
@@ -117,7 +111,6 @@ func (t *TCPStream) ReassemblyComplete(ac reassembly.AssemblerContext) bool {
 	close(t.client.bytes)
 	close(t.server.bytes)
 
-	// do not remove the connection to allow last ACK
 	return false
 }
 

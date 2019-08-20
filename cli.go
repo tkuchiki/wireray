@@ -4,12 +4,16 @@ import (
 	"io"
 	"os"
 
+	"github.com/tkuchiki/wireray/helpers"
+
+	stats_flags "github.com/tkuchiki/alp/flags"
+
 	"github.com/tkuchiki/wireray/options"
 
-	"github.com/tkuchiki/gohttpstats/options"
-	"github.com/tkuchiki/wireray/flag"
+	stats_options "github.com/tkuchiki/alp/options"
+	"github.com/tkuchiki/wireray/flags"
 
-	"github.com/tkuchiki/gohttpstats"
+	"github.com/tkuchiki/alp/stats"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -20,30 +24,36 @@ type Profiler struct {
 	errWriter    io.Writer
 	inReader     *os.File
 	optionParser *kingpin.Application
-	flags        *flag.Flags
+	flags        *flags.Flags
 }
 
-func NewProfiler(outw, errw io.Writer) *Profiler {
+func NewProfiler(outw, errw io.Writer) (*Profiler, error) {
 	p := &Profiler{
 		outWriter:    outw,
 		errWriter:    errw,
 		inReader:     os.Stdin,
 		optionParser: kingpin.New("wireray", "HTTP profiler"),
 	}
-	p.flags = flag.NewFlags()
 
+	iface, err := helpers.GetLoopbakInterface()
+	if err != nil {
+		return nil, err
+	}
+
+	p.flags = flags.NewFlags(iface)
 	p.flags.InitCommonFlags(p.optionParser)
+
+	p.flags.Stats = stats_flags.NewGlobalFlags()
+	p.flags.Stats.InitGlobalFlags(p.optionParser)
 
 	_ = p.optionParser.Command("capture", "Record pcap file")
 	_ = p.optionParser.Command("logging", "Logging")
-	profile := p.optionParser.Command("profiling", "Profiling")
+	_ = p.optionParser.Command("profiling", "Profiling")
 
-	p.flags.InitProfileFlags(profile)
-
-	return p
+	return p, nil
 }
 
-func (p *Profiler) SetFlags(flags *flag.Flags) {
+func (p *Profiler) SetFlags(flags *flags.Flags) {
 	p.flags = flags
 }
 
@@ -71,40 +81,7 @@ func (p *Profiler) Run() error {
 		return err
 	}
 
-	var sort string
-	if p.flags.Stats.Max {
-		sort = httpstats.SortMaxResponseTime
-	} else if p.flags.Stats.Min {
-		sort = httpstats.SortMinResponseTime
-	} else if p.flags.Stats.Avg {
-		sort = httpstats.SortAvgResponseTime
-	} else if p.flags.Stats.Sum {
-		sort = httpstats.SortSumResponseTime
-	} else if p.flags.Stats.Cnt {
-		sort = httpstats.SortCount
-	} else if p.flags.Stats.P1 {
-		sort = httpstats.SortP1ResponseTime
-	} else if p.flags.Stats.P50 {
-		sort = httpstats.SortP50ResponseTime
-	} else if p.flags.Stats.P99 {
-		sort = httpstats.SortP99ResponseTime
-	} else if p.flags.Stats.Stddev {
-		sort = httpstats.SortStddevResponseTime
-	} else if p.flags.Stats.SortUri {
-		sort = httpstats.SortUri
-	} else if p.flags.Stats.Method {
-		sort = httpstats.SortMethod
-	} else if p.flags.Stats.MaxBody {
-		sort = httpstats.SortMaxResponseBodySize
-	} else if p.flags.Stats.MinBody {
-		sort = httpstats.SortMinResponseBodySize
-	} else if p.flags.Stats.AvgBody {
-		sort = httpstats.SortAvgResponseBodySize
-	} else if p.flags.Stats.SumBody {
-		sort = httpstats.SortSumResponseBodySize
-	} else {
-		sort = httpstats.SortMaxResponseTime
-	}
+	sort := stats_flags.SortOptions[p.flags.Stats.Sort]
 
 	var opts *options.Options
 	if p.flags.Stats.Config != "" {
@@ -128,6 +105,8 @@ func (p *Profiler) Run() error {
 		options.Port(p.flags.Common.Port),
 		options.Pcap(p.flags.Common.Pcap),
 		options.Lazy(p.flags.Common.Lazy),
+		options.Body(p.flags.Common.Body),
+		options.Gunzip(p.flags.Common.Gunzip),
 	)
 
 	opts.StatsOptions = stats_options.SetOptions(opts.StatsOptions,
@@ -135,53 +114,38 @@ func (p *Profiler) Run() error {
 		stats_options.Sort(sort),
 		stats_options.Reverse(p.flags.Stats.Reverse),
 		stats_options.QueryString(p.flags.Stats.QueryString),
-		stats_options.Tsv(p.flags.Stats.Tsv),
-		stats_options.ApptimeLabel(p.flags.Stats.ApptimeLabel),
-		stats_options.ReqtimeLabel(p.flags.Stats.ReqtimeLabel),
-		stats_options.StatusLabel(p.flags.Stats.StatusLabel),
-		stats_options.SizeLabel(p.flags.Stats.SizeLabel),
-		stats_options.MethodLabel(p.flags.Stats.MethodLabel),
-		stats_options.UriLabel(p.flags.Stats.UriLabel),
-		stats_options.TimeLabel(p.flags.Stats.TimeLabel),
+		stats_options.Format(p.flags.Stats.Format),
 		stats_options.Limit(p.flags.Stats.Limit),
+		stats_options.Location(p.flags.Stats.Location),
+		stats_options.Output(p.flags.Stats.Output),
 		stats_options.NoHeaders(p.flags.Stats.NoHeaders),
-		stats_options.StartTime(p.flags.Stats.StartTime),
-		stats_options.EndTime(p.flags.Stats.EndTime),
-		stats_options.StartTimeDuration(p.flags.Stats.StartTimeDuration),
-		stats_options.EndTimeDuration(p.flags.Stats.EndTimeDuration),
-		stats_options.CSVIncludes(p.flags.Stats.Includes),
-		stats_options.CSVExcludes(p.flags.Stats.Excludes),
-		stats_options.CSVIncludeStatuses(p.flags.Stats.IncludeStatuses),
-		stats_options.CSVExcludeStatuses(p.flags.Stats.ExcludeStatuses),
-		stats_options.CSVAggregates(p.flags.Stats.Aggregates),
+		stats_options.ShowFooters(p.flags.Stats.ShowFooters),
+		stats_options.CSVGroups(p.flags.Stats.MatchingGroups),
+		stats_options.Filters(p.flags.Stats.Filters),
 	)
 
-	po := httpstats.NewPrintOptions()
-	po.SetWriter(p.outWriter)
-	if opts.StatsOptions.Tsv {
-		po.SetFormat("tsv")
-	}
-	stats := httpstats.NewHTTPStats(true, false, false, po)
+	sts := stats.NewHTTPStats(true, false, false)
 
-	err = stats.InitFilter(opts.StatsOptions)
+	err = sts.InitFilter(opts.StatsOptions)
 	if err != nil {
 		return err
 	}
 
-	stats.SetOptions(opts.StatsOptions)
+	sts.SetOptions(opts.StatsOptions)
 
-	//if p.flags.Profile.IsProfiling || p.flags.Profile.IsLogging {
-	//	return fmt.Errorf("--profile or --logging is required")
-	//}
+	printer := stats.NewPrinter(p.outWriter, opts.StatsOptions.Output, opts.StatsOptions.Format, opts.StatsOptions.NoHeaders, opts.StatsOptions.ShowFooters)
+	if err = printer.Validate(); err != nil {
+		return err
+	}
 
-	if len(opts.StatsOptions.Aggregates) > 0 {
-		err = stats.SetURICapturingGroups(opts.StatsOptions.Aggregates)
+	if len(opts.StatsOptions.MatchingGroups) > 0 {
+		err = sts.SetURIMatchingGroups(opts.StatsOptions.MatchingGroups)
 		if err != nil {
 			return err
 		}
 	}
 
-	profiler := NewHTTPProfiler(opts, stats)
+	profiler := NewHTTPProfiler(opts, sts, printer)
 
 	switch subcmd {
 	case "capture":
