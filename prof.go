@@ -70,7 +70,11 @@ func (prof *HTTPProfiler) WritePcap(pfile string) error {
 	if err != nil {
 		return err
 	}
-	defer handle.Close()
+
+	// TODO: fix
+	// https://github.com/google/gopacket/issues/253
+	//defer handle.Close()
+
 	bpffilter := bpfFilterWithPort(prof.opts.Port)
 	log.Println(fmt.Sprintf("Using BPF filter %q", bpffilter))
 	if err = handle.SetBPFFilter(bpffilter); err != nil {
@@ -113,7 +117,9 @@ func (prof *HTTPProfiler) Profile() error {
 	if err != nil {
 		return err
 	}
-	defer handle.Close()
+	// TODO: fix
+	// https://github.com/google/gopacket/issues/253
+	//defer handle.Close()
 
 	bpffilter := bpfFilterWithPort(prof.opts.Port)
 	log.Println(fmt.Sprintf("Using BPF filter %q", bpffilter))
@@ -259,7 +265,10 @@ func (prof *HTTPProfiler) LiveLogging() error {
 	if err != nil {
 		return err
 	}
-	defer handle.Close()
+
+	// TODO: fix
+	// https://github.com/google/gopacket/issues/253
+	//defer handle.Close()
 
 	bpffilter := bpfFilterWithPort(prof.opts.Port)
 	log.Println(fmt.Sprintf("Using BPF filter %q", bpffilter))
