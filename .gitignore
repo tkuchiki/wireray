@@ -15,3 +15,4 @@
 cli/wireray/*
 !cli/wireray/main.go
 vendor/
+wireray

@@ -4,9 +4,19 @@ wireray is a tool for packet capture and HTTP logging / profiling.
 
 :warning: v0.1.0 is still unstable :warning:
 
+## Requirements
+
+- libpcap
+    - `apt-get install libpcap-dev`
+    - `yum install libpcap-devel`
+
 ## Installation
 
-Download from https://github.com/tkuchiki/wireray/releases 
+Download from https://github.com/tkuchiki/wireray/releases
+
+## :warning: Known Issues :warning:
+
+- https://github.com/google/gopacket/issues/253  
 
 ## Usage
 
