@@ -97,7 +97,5 @@ $ sudo wireray profiling --port=8080
 
 # terminal 2
 $ curl -H "Content-Type: application/json" -H "Accept-Encoding: gzip" -s localhost:8080 > /dev/null
-Exec: 0.032 sec
-
 $ curl -s localhost:8080 > /dev/null
 ```
